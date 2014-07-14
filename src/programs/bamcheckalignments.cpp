@@ -1,3 +1,22 @@
+/**
+    bambam
+    Copyright (C) 2009-2013 German Tischler
+    Copyright (C) 2011-2013 Genome Research Limited
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+**/
+#include <config.h>
 #include <iostream>
 #include <cstdlib>
 #include <libmaus/util/ArgInfo.hpp>
@@ -7,6 +26,12 @@
 #include <libmaus/util/TempFileRemovalContainer.hpp>
 #include <libmaus/bambam/BamDecoder.hpp>
 #include <libmaus/bambam/BamWriter.hpp>
+#include <libmaus/bambam/BamHeaderUpdate.hpp>
+
+#include <libmaus/lz/BgzfDeflateOutputCallbackMD5.hpp>
+#include <libmaus/bambam/BgzfDeflateOutputCallbackBamIndex.hpp>
+static int getDefaultMD5() { return 0; }
+static int getDefaultIndex() { return 0; }
 
 bool checkCigarValid(
 	::libmaus::bambam::BamAlignment const & alignment,
@@ -23,7 +48,7 @@ bool checkCigarValid(
 		return false;
 	}
 	
-	if ( alignment.getRefID() < 0 || alignment.getRefID() >= static_cast<int64_t>(bamheader.chromosomes.size()) )
+	if ( alignment.getRefID() < 0 || alignment.getRefID() >= static_cast<int64_t>(bamheader.getNumRef()) )
 	{
 		std::cerr << "[E] reference id " << alignment.getRefID() << " out of range for " << alignment.getName() << std::endl;
 		return false;
@@ -168,17 +193,16 @@ int main(int argc, char * argv[])
 			fapref [ i ] += info[i].idlen + 2; // > + newline
 
 		::libmaus::bambam::BamDecoder decoder(std::cin);
-		::libmaus::bambam::BamHeader const & bamheader = decoder.bamheader;
-		// std::vector< ::libmaus::bambam::Chromosome > chromosomes
+		::libmaus::bambam::BamHeader const & bamheader = decoder.getHeader();
 
 		::libmaus::autoarray::AutoArray<uint8_t> uptab(256,false);
 		for ( uint64_t j = 0; j < uptab.size(); ++j )
 			uptab[j] = toupper(j);
 		
-		::libmaus::autoarray::AutoArray < ::libmaus::autoarray::AutoArray<uint8_t>::unique_ptr_type > text(bamheader.chromosomes.size());
-		for ( uint64_t i = 0; i < bamheader.chromosomes.size(); ++i )
+		::libmaus::autoarray::AutoArray < ::libmaus::autoarray::AutoArray<uint8_t>::unique_ptr_type > text(bamheader.getNumRef());
+		for ( uint64_t i = 0; i < bamheader.getNumRef(); ++i )
 		{
-			std::string const bamchrname = bamheader.chromosomes[i].name;
+			std::string const bamchrname = bamheader.getRefIDName(i);
 			if ( fachr.find(bamchrname) == fachr.end() )
 			{
 				::libmaus::exception::LibMausException se;
@@ -187,17 +211,18 @@ int main(int argc, char * argv[])
 				throw se;
 			}
 			uint64_t const faid = fachr.find(bamchrname)->second;
-			if ( bamheader.chromosomes[i].len != info[faid].seqlen )
+			if ( bamheader.getRefIDLength(i) != static_cast<int64_t>(info[faid].seqlen) )
 			{
 				::libmaus::exception::LibMausException se;
-				se.getStream() << "Reference sequence " << bamchrname << " has len " << bamheader.chromosomes[i].len << " in bam file but " << info[faid].seqlen << " in fa file." << std::endl;
+				se.getStream() << "Reference sequence " << bamchrname << " has len " << bamheader.getRefIDLength(i) << " in bam file but " << info[faid].seqlen << " in fa file." << std::endl;
 				se.finish();
 				throw se;
 			}
 			
-			if ( bamheader.chromosomes.size() < 100 )
+			if ( bamheader.getNumRef() < 100 )
 				std::cerr << "Loading sequence " << bamchrname << " of length " << info[faid].seqlen << std::endl;
-			text [ i ] = UNIQUE_PTR_MOVE(::libmaus::autoarray::AutoArray<uint8_t>::unique_ptr_type(new ::libmaus::autoarray::AutoArray<uint8_t>(info[faid].seqlen,false)));
+			::libmaus::autoarray::AutoArray<uint8_t>::unique_ptr_type ttext(new ::libmaus::autoarray::AutoArray<uint8_t>(info[faid].seqlen,false));
+			text [ i ] = UNIQUE_PTR_MOVE(ttext);
 			::libmaus::aio::CheckedInputStream CIS(fatempfilename);
 			CIS.seekg(fapref[faid]);
 			CIS.read(reinterpret_cast<char *>(text[i]->begin()),info[faid].seqlen);
@@ -211,14 +236,63 @@ int main(int argc, char * argv[])
 				*pa = uptab[*pa];
 		}
 		
-		for ( uint64_t i = 0; i < bamheader.chromosomes.size(); ++i )
+		for ( uint64_t i = 0; i < bamheader.getNumRef(); ++i )
 		{
-			assert ( text[i]->size() == bamheader.chromosomes[i].len );
+			assert ( static_cast<int64_t>(text[i]->size()) == bamheader.getRefIDLength(i) );
 		}
 		
 		uint64_t decoded = 0;
+
+		/*
+		 * start index/md5 callbacks
+		 */
+		std::string const tmpfilenamebase = arginfo.getValue<std::string>("tmpfile",arginfo.getDefaultTmpFileName());
+		std::string const tmpfileindex = tmpfilenamebase + "_index";
+		::libmaus::util::TempFileRemovalContainer::addTempFile(tmpfileindex);
+
+		std::string md5filename;
+		std::string indexfilename;
+
+		std::vector< ::libmaus::lz::BgzfDeflateOutputCallback * > cbs;
+		::libmaus::lz::BgzfDeflateOutputCallbackMD5::unique_ptr_type Pmd5cb;
+		if ( arginfo.getValue<unsigned int>("md5",getDefaultMD5()) )
+		{
+			if ( arginfo.hasArg("md5filename") &&  arginfo.getUnparsedValue("md5filename","") != "" )
+				md5filename = arginfo.getUnparsedValue("md5filename","");
+			else
+				std::cerr << "[V] no filename for md5 given, not creating hash" << std::endl;
+
+			if ( md5filename.size() )
+			{
+				::libmaus::lz::BgzfDeflateOutputCallbackMD5::unique_ptr_type Tmd5cb(new ::libmaus::lz::BgzfDeflateOutputCallbackMD5);
+				Pmd5cb = UNIQUE_PTR_MOVE(Tmd5cb);
+				cbs.push_back(Pmd5cb.get());
+			}
+		}
+		libmaus::bambam::BgzfDeflateOutputCallbackBamIndex::unique_ptr_type Pindex;
+		if ( arginfo.getValue<unsigned int>("index",getDefaultIndex()) )
+		{
+			if ( arginfo.hasArg("indexfilename") &&  arginfo.getUnparsedValue("indexfilename","") != "" )
+				indexfilename = arginfo.getUnparsedValue("indexfilename","");
+			else
+				std::cerr << "[V] no filename for index given, not creating index" << std::endl;
+
+			if ( indexfilename.size() )
+			{
+				libmaus::bambam::BgzfDeflateOutputCallbackBamIndex::unique_ptr_type Tindex(new libmaus::bambam::BgzfDeflateOutputCallbackBamIndex(tmpfileindex));
+				Pindex = UNIQUE_PTR_MOVE(Tindex);
+				cbs.push_back(Pindex.get());
+			}
+		}
+		std::vector< ::libmaus::lz::BgzfDeflateOutputCallback * > * Pcbs = 0;
+		if ( cbs.size() )
+			Pcbs = &cbs;
+		/*
+		 * end md5/index callbacks
+		 */
 		
-		::libmaus::bambam::BamWriter BW(std::cout,bamheader);
+		::libmaus::bambam::BamHeader::unique_ptr_type uphead(libmaus::bambam::BamHeaderUpdate::updateHeader(arginfo,bamheader,"bamcheckalignments",std::string(PACKAGE_VERSION)));
+		::libmaus::bambam::BamWriter BW(std::cout,*uphead,Z_DEFAULT_COMPRESSION,Pcbs);
 		
 		while ( decoder.readAlignment() )
 		{
@@ -229,7 +303,7 @@ int main(int argc, char * argv[])
 				std::cerr << "[V] " << decoded << std::endl;
 			}
 			
-			::libmaus::bambam::BamAlignment & alignment = decoder.alignment;
+			::libmaus::bambam::BamAlignment & alignment = decoder.getAlignment();
 
 			bool const cigok = checkCigarValid(alignment,bamheader,text);
 			
@@ -326,11 +400,20 @@ int main(int argc, char * argv[])
 					}
 					
 					alignment.replaceCigarString(newcigarstream.str());
-					alignment.replaceSequence(modseq);
+					alignment.replaceSequence(modseq,alignment.getQual());
 				}
 
-				alignment.serialise(BW.bgzfos);
+				alignment.serialise(BW.getStream());
 			}			
+		}
+
+		if ( Pmd5cb )
+		{
+			Pmd5cb->saveDigestAsFile(md5filename);
+		}
+		if ( Pindex )
+		{
+			Pindex->flush(std::string(indexfilename));
 		}
 	}
 	catch(std::exception const & ex)

@@ -17,12 +17,18 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 **/
 #include <libmaus/bambam/CollatingBamDecoder.hpp>
+#include <libmaus/bambam/BamBlockWriterBaseFactory.hpp>
 #include <libmaus/bambam/BamWriter.hpp>
-#include <libmaus/util/ArgInfo.hpp>
 #include <libmaus/bambam/ProgramHeaderLineSet.hpp>
+#include <libmaus/util/ArgInfo.hpp>
 #include <biobambam/Licensing.hpp>
 
 #include <config.h>
+
+#include <libmaus/lz/BgzfDeflateOutputCallbackMD5.hpp>
+#include <libmaus/bambam/BgzfDeflateOutputCallbackBamIndex.hpp>
+static int getDefaultMD5() { return 0; }
+static int getDefaultIndex() { return 0; }
 
 static uint64_t getDefaultMaskNeg()
 {
@@ -43,12 +49,12 @@ int bammaskflags(::libmaus::util::ArgInfo const & arginfo)
 	if ( mask )
 	{
 		std::cerr << "Keeping flags ";
-		for ( uint64_t i = 1; i <= ::libmaus::bambam::BamFlagBase::LIBMAUS_BAMBAM_FDUP; i <<= 1 )
+		for ( uint64_t i = 1; i <= ::libmaus::bambam::BamFlagBase::LIBMAUS_BAMBAM_FSUPPLEMENTARY; i <<= 1 )
 			if ( mask & i )
 				std::cerr << static_cast< ::libmaus::bambam::BamFlagBase::bam_flags >(i) << ";";
 		std::cerr << std::endl;
 		std::cerr << "Erasing flags ";
-		for ( uint64_t i = 1; i <= ::libmaus::bambam::BamFlagBase::LIBMAUS_BAMBAM_FDUP; i <<= 1 )
+		for ( uint64_t i = 1; i <= ::libmaus::bambam::BamFlagBase::LIBMAUS_BAMBAM_FSUPPLEMENTARY; i <<= 1 )
 			if ( !(mask & i) )
 				std::cerr << static_cast< ::libmaus::bambam::BamFlagBase::bam_flags >(i) << ";";
 		std::cerr << std::endl;
@@ -58,32 +64,11 @@ int bammaskflags(::libmaus::util::ArgInfo const & arginfo)
 		std::cerr << "Erasing all flags." << std::endl;
 	}
 
-	int const level = arginfo.getValue<int>("level",getDefaultLevel());
+	int const level = libmaus::bambam::BamBlockWriterBaseFactory::checkCompressionLevel(arginfo.getValue<int>("level",getDefaultLevel()));
+	int const resetmatecoord = arginfo.getValue<int>("resetmatecoord",0);
 	
-	switch ( level )
-	{
-		case Z_NO_COMPRESSION:
-		case Z_BEST_SPEED:
-		case Z_BEST_COMPRESSION:
-		case Z_DEFAULT_COMPRESSION:
-			break;
-		default:
-		{
-			::libmaus::exception::LibMausException se;
-			se.getStream()
-				<< "Unknown compression level, please use"
-				<< " level=" << Z_DEFAULT_COMPRESSION << " (default) or"
-				<< " level=" << Z_BEST_SPEED << " (fast) or"
-				<< " level=" << Z_BEST_COMPRESSION << " (best) or"
-				<< " level=" << Z_NO_COMPRESSION << " (no compression)" << std::endl;
-			se.finish();
-			throw se;
-		}
-			break;
-	}
-
 	::libmaus::bambam::BamDecoder BD(std::cin);
-	::libmaus::bambam::BamHeader const & bamheader = BD.bamheader;
+	::libmaus::bambam::BamHeader const & bamheader = BD.getHeader();
 
 	std::string const headertext(bamheader.text);
 
@@ -99,14 +84,79 @@ int bammaskflags(::libmaus::util::ArgInfo const & arginfo)
 	// construct new header
 	::libmaus::bambam::BamHeader uphead(upheadtext);
 
-	::libmaus::bambam::BamAlignment & alignment = BD.alignment;
-	::libmaus::bambam::BamWriter writer(std::cout,uphead,level);
+	::libmaus::bambam::BamAlignment & alignment = BD.getAlignment();
+
+	/*
+	 * start index/md5 callbacks
+	 */
+	std::string const tmpfilenamebase = arginfo.getValue<std::string>("tmpfile",arginfo.getDefaultTmpFileName());
+	std::string const tmpfileindex = tmpfilenamebase + "_index";
+	::libmaus::util::TempFileRemovalContainer::addTempFile(tmpfileindex);
+
+	std::string md5filename;
+	std::string indexfilename;
+
+	std::vector< ::libmaus::lz::BgzfDeflateOutputCallback * > cbs;
+	::libmaus::lz::BgzfDeflateOutputCallbackMD5::unique_ptr_type Pmd5cb;
+	if ( arginfo.getValue<unsigned int>("md5",getDefaultMD5()) )
+	{
+		if ( arginfo.hasArg("md5filename") &&  arginfo.getUnparsedValue("md5filename","") != "" )
+			md5filename = arginfo.getUnparsedValue("md5filename","");
+		else
+			std::cerr << "[V] no filename for md5 given, not creating hash" << std::endl;
+
+		if ( md5filename.size() )
+		{
+			::libmaus::lz::BgzfDeflateOutputCallbackMD5::unique_ptr_type Tmd5cb(new ::libmaus::lz::BgzfDeflateOutputCallbackMD5);
+			Pmd5cb = UNIQUE_PTR_MOVE(Tmd5cb);
+			cbs.push_back(Pmd5cb.get());
+		}
+	}
+	libmaus::bambam::BgzfDeflateOutputCallbackBamIndex::unique_ptr_type Pindex;
+	if ( arginfo.getValue<unsigned int>("index",getDefaultIndex()) )
+	{
+		if ( arginfo.hasArg("indexfilename") &&  arginfo.getUnparsedValue("indexfilename","") != "" )
+			indexfilename = arginfo.getUnparsedValue("indexfilename","");
+		else
+			std::cerr << "[V] no filename for index given, not creating index" << std::endl;
+
+		if ( indexfilename.size() )
+		{
+			libmaus::bambam::BgzfDeflateOutputCallbackBamIndex::unique_ptr_type Tindex(new libmaus::bambam::BgzfDeflateOutputCallbackBamIndex(tmpfileindex));
+			Pindex = UNIQUE_PTR_MOVE(Tindex);
+			cbs.push_back(Pindex.get());
+		}
+	}
+	std::vector< ::libmaus::lz::BgzfDeflateOutputCallback * > * Pcbs = 0;
+	if ( cbs.size() )
+		Pcbs = &cbs;
+	/*
+	 * end md5/index callbacks
+	 */
+
+	::libmaus::bambam::BamWriter::unique_ptr_type writer(new ::libmaus::bambam::BamWriter(std::cout,uphead,level,Pcbs));
 	
 	while ( BD.readAlignment() )
 	{
 		alignment.putFlags(alignment.getFlags() & mask);
-		alignment.serialise(writer.bgzfos);
+		if ( resetmatecoord )
+		{
+			alignment.putNextRefId(-1);
+			alignment.putNextPos(-1);
+		}
+		alignment.serialise(writer->getStream());
 	}	
+
+	writer.reset();
+
+	if ( Pmd5cb )
+	{
+		Pmd5cb->saveDigestAsFile(md5filename);
+	}
+	if ( Pindex )
+	{
+		Pindex->flush(std::string(indexfilename));
+	}
 
 	return EXIT_SUCCESS;
 }
@@ -140,8 +190,13 @@ int main(int argc, char * argv[])
 				
 				std::vector< std::pair<std::string,std::string> > V;
 			
-				V.push_back ( std::pair<std::string,std::string> ( "level=<["+::biobambam::Licensing::formatNumber(getDefaultLevel())+"]>", "compression settings for output bam file (0=uncompressed,1=fast,9=best,-1=zlib default)" ) );
-				V.push_back ( std::pair<std::string,std::string> ( "maskneg=<["+::biobambam::Licensing::formatNumber(getDefaultMaskNeg())+"]>", "flag masking bitmask" ) );
+				V.push_back ( std::pair<std::string,std::string> ( "level=<["+::biobambam::Licensing::formatNumber(getDefaultLevel())+"]>", libmaus::bambam::BamBlockWriterBaseFactory::getBamOutputLevelHelpText() ) );
+				V.push_back ( std::pair<std::string,std::string> ( "maskneg=<["+::biobambam::Licensing::formatNumber(getDefaultMaskNeg())+"]>", "flag masking bitmask (bits set are removed)" ) );
+				V.push_back ( std::pair<std::string,std::string> ( "md5=<["+::biobambam::Licensing::formatNumber(getDefaultMD5())+"]>", "create md5 check sum (default: 0)" ) );
+				V.push_back ( std::pair<std::string,std::string> ( "md5filename=<filename>", "file name for md5 check sum (default: extend output file name)" ) );
+				V.push_back ( std::pair<std::string,std::string> ( "index=<["+::biobambam::Licensing::formatNumber(getDefaultIndex())+"]>", "create BAM index (default: 0)" ) );
+				V.push_back ( std::pair<std::string,std::string> ( "indexfilename=<filename>", "file name for BAM index file (default: extend output file name)" ) );
+				V.push_back ( std::pair<std::string,std::string> ( "tmpfile=<filename>", "prefix for temporary files, default: create files in current directory" ) );
 
 				::biobambam::Licensing::printMap(std::cerr,V);
 

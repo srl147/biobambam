@@ -16,10 +16,10 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 **/
-#if ! defined(BAMBAMCONFIG_HPP)
-#define BAMBAMCONFIG_HPP
+#if ! defined(BIOBAMBAM_STRIP12_HPP)
+#define BIOBAMBAM_STRIP12_HPP
 
+#include <libmaus/bambam/BamAlignment.hpp>
 
-
-
+bool strip12(libmaus::bambam::BamAlignment & algn);
 #endif
