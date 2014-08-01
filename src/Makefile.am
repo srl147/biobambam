@@ -69,7 +69,8 @@ bin_PROGRAMS = bamtofastq bammarkduplicates bamsort bamcollate bammaskflags bamr
 noinst_PROGRAMS = bamfilter bamfixmatecoordinates bamfixmatecoordinatesnamesorted bamcheckalignments bamtoname \
 	bamdisthist bamrefdepth fastabgzfextract bamfilternames @BAMREFDEPTHPEAKS@ \
 	@BAMPARSORTNOINSTEXP@ bamheap bamfrontback bamclipextract \
-	@BAMALIGNMENTOFFSETSNOINSTEXP@ @BLASTXMLTOBAMNOINSTEXP@
+	@BAMALIGNMENTOFFSETSNOINSTEXP@ @BLASTXMLTOBAMNOINSTEXP@ bamrandomtag \
+	bamstreamingmarkduplicates
 	
 EXTRA_PROGRAMS = bamrefdepthpeaks bamparsort blastnxmltobam bamalignmentoffsets
 
@@ -97,6 +98,11 @@ bammarkduplicates_SOURCES = programs/bammarkduplicates.cpp biobambam/Licensing.c
 bammarkduplicates_LDADD = ${LIBMAUSLIBS}
 bammarkduplicates_LDFLAGS = ${AM_CPPFLAGS} ${LIBMAUSCPPFLAGS} ${LIBMAUSLDFLAGS} ${AM_LDFLAGS}
 bammarkduplicates_CPPFLAGS = ${AM_CPPFLAGS} ${LIBMAUSCPPFLAGS}
+
+bamstreamingmarkduplicates_SOURCES = programs/bamstreamingmarkduplicates.cpp biobambam/Licensing.cpp
+bamstreamingmarkduplicates_LDADD = ${LIBMAUSLIBS}
+bamstreamingmarkduplicates_LDFLAGS = ${AM_CPPFLAGS} ${LIBMAUSCPPFLAGS} ${LIBMAUSLDFLAGS} ${AM_LDFLAGS}
+bamstreamingmarkduplicates_CPPFLAGS = ${AM_CPPFLAGS} ${LIBMAUSCPPFLAGS}
 
 bammarkduplicates2_SOURCES = programs/bammarkduplicates2.cpp biobambam/Licensing.cpp
 bammarkduplicates2_LDADD = ${LIBMAUSLIBS}
@@ -362,3 +368,8 @@ bamintervalcommenthist_SOURCES = programs/bamintervalcommenthist.cpp biobambam/L
 bamintervalcommenthist_LDADD = ${LIBMAUSLIBS}
 bamintervalcommenthist_LDFLAGS = ${AM_CPPFLAGS} ${LIBMAUSCPPFLAGS} ${LIBMAUSLDFLAGS} ${AM_LDFLAGS}
 bamintervalcommenthist_CPPFLAGS = ${AM_CPPFLAGS} ${LIBMAUSCPPFLAGS}
+
+bamrandomtag_SOURCES = programs/bamrandomtag.cpp biobambam/Licensing.cpp
+bamrandomtag_LDADD = ${LIBMAUSLIBS}
+bamrandomtag_LDFLAGS = ${AM_CPPFLAGS} ${LIBMAUSCPPFLAGS} ${LIBMAUSLDFLAGS} ${AM_LDFLAGS}
+bamrandomtag_CPPFLAGS = ${AM_CPPFLAGS} ${LIBMAUSCPPFLAGS}
